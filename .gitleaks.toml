@@ -1,0 +1,51 @@
+title = "Graspr — secrets + signatures d'obfuscation/dropper"
+
+# Conserve toutes les règles de détection de secrets par défaut (clés API, tokens…)
+[extend]
+useDefault = true
+
+# ── Règles maison : signatures de la charge malveillante trouvée dans .eslintrc.js ──
+# (dropper "EtherHiding" — cf. incident commit a145775 / PR #88)
+
+[[rules]]
+id = "obf-global-require-stash"
+description = "Payload qui planque require sur global (signature dropper)"
+regex = '''global\s*\[\s*['"][^'"]{1,6}['"]\s*\]\s*=\s*require'''
+tags = ["malware", "obfuscation"]
+
+[[rules]]
+id = "obf-underscore-dollar-vars"
+description = "Noms de variables fortement obfusqués (_$_xxxx)"
+regex = '''_\$_[0-9a-fA-F]{3,}'''
+tags = ["malware", "obfuscation"]
+
+[[rules]]
+id = "obf-function-constructor-eval"
+description = "Function-as-constructor pour eval dynamique (['constructor'](...))"
+regex = '''\[\s*['"]constructor['"]\s*\]\s*\('''
+tags = ["malware", "obfuscation"]
+
+[[rules]]
+id = "obf-global-bang-marker"
+description = "Marqueur global['!'] observé dans le dropper"
+regex = '''global\s*\[\s*['"]!['"]\s*\]'''
+tags = ["malware"]
+
+[[rules]]
+id = "malware-blockchain-c2"
+description = "Dead-drops blockchain utilisés par le loader (Tron/Aptos/BSC)"
+regex = '''(api\.trongrid\.io|fullnode\.mainnet\.aptoslabs\.com|bsc-dataseed\.binance\.org|bsc-rpc\.publicnode\.com)'''
+tags = ["malware", "c2"]
+
+[[rules]]
+id = "obf-fromcharcode-chain"
+description = "Chaîne fromCharCode/charCodeAt typique d'un décodeur obfusqué en boucle"
+regex = '''String\.fromCharCode\([^)]*\)[\s\S]{0,40}(split|join|charCodeAt)'''
+tags = ["obfuscation"]
+
+[allowlist]
+description = "Faux positifs légitimes : ce fichier (contient volontairement les signatures) + le commit de SUPPRESSION du dropper (cbd09c2), sinon la suppression du payload serait flaggée."
+commits = ["cbd09c2f378d89f414cad888339a5743e52f3226"]
+paths = [
+  '''\.gitleaks\.toml''',
+]

@@ -1,0 +1,17 @@
+# Config lint du contrat d'API (Goal 3 — docs/api-contract-plan.md §8).
+# Rejouable en local et en CI : `yarn lint:api` (voir package.json).
+apis:
+  contract:
+    root: openapi.yaml
+  # Jumeau anglais dérivé — openapi.yaml (FR) reste la source de vérité unique.
+  # Ne pas éditer openapi.en.yaml directement : régénérer depuis la version FR.
+  contract-en:
+    root: openapi.en.yaml
+
+extends:
+  - recommended
+
+rules:
+  # Le contrat trace chaque opération avec x-status (exist|adapt|new) et x-source
+  # (fichier:ligne / §SOP / décision) — extensions volontaires, cf. info.description.
+  no-unused-components: warn

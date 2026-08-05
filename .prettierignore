@@ -1,0 +1,14 @@
+# Contrat OpenAPI GELÉ (tag contract-v1), prouvé FR≡EN — Prettier ne doit JAMAIS le
+# reformater. Son format est géré par Redocly (yarn lint:api), pas par Prettier.
+openapi.yaml
+openapi.en.yaml
+
+# Documentation : prose Markdown, hors périmètre Prettier.
+docs/
+*.md
+
+# Artefacts générés (reconstructibles)
+openapi.html
+openapi.en.html
+dist/
+coverage/

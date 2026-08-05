@@ -1,0 +1,78 @@
+{
+  // ────────────────────────────────────────────────────────────────────────
+  // Baseline de vulnérabilités — générée le 2026-07-08 (yarn audit).
+  // audit-ci BLOQUE sur toute NOUVELLE vulnérabilité moderate+ absente de cette
+  // liste ; les 112 advisories legacy pré-existants ci-dessous sont tolérés
+  // (dette à traiter à la migration des domaines concernés — cf. ticket).
+  // Régénérer après nettoyage : documenter tout ajout, ne jamais tolérer à l’aveugle.
+  // ────────────────────────────────────────────────────────────────────────
+  "$schema": "https://github.com/IBM/audit-ci/raw/main/docs/schema.json",
+  "moderate": true,
+  "allowlist": [
+    // GHSA-mh99-v99m-4gvg — brace-expansion <=5.0.7 (high, ReDoS), publiée le 23 Jul 2026.
+    // DEV-ONLY : chaînes jest/eslint (test-exclude>glob>minimatch), zéro exposition runtime.
+    // INFIXABLE au 27 Jul : fix unique 5.0.8 = export-fonction supprimé -> casse minimatch 3/5/9
+    // (vérifié empiriquement) ; aucun backport 1.x/2.x publié.
+    // À RETIRER dès qu'un backport 1.x/2.x sort ou que les consommateurs migrent.
+    "GHSA-mh99-v99m-4gvg",
+    "GHSA-23c5-xmqv-rm74",
+    "GHSA-25h7-pfq9-p65f",
+    "GHSA-268h-hp4c-crq3",
+    "GHSA-2g4f-4pwh-qvx6",
+    "GHSA-3644-q5cj-c5c7",
+    "GHSA-36xv-jgw5-4q75",
+    "GHSA-37ch-88jc-xwx2",
+    "GHSA-3h5v-q93c-6h6q",
+    "GHSA-3ppc-4f35-3m26",
+    "GHSA-3v7f-55p6-f55p",
+    "GHSA-3xgq-45jj-v275",
+    "GHSA-48c2-rrv3-qjmp",
+    "GHSA-4pg4-qvpc-4q3h",
+    "GHSA-4vvj-4cpr-p986",
+    "GHSA-58qx-3vcg-4xpx",
+    "GHSA-5c6j-r48x-rmvq",
+    "GHSA-5j98-mcp5-4vw2",
+    "GHSA-5v7r-6r5c-r473",
+    "GHSA-677m-j7p3-52f9",
+    "GHSA-6rw7-vpxm-498p",
+    "GHSA-7r86-cg39-jmmj",
+    "GHSA-8gw3-rxh4-v6jx",
+    "GHSA-952p-6rrq-rcjv",
+    "GHSA-968p-4wvh-cqc8",
+    "GHSA-96hv-2xvq-fx4p",
+    "GHSA-9965-vmph-33xx",
+    "GHSA-9wv6-86v2-598j",
+    "GHSA-c2c7-rcm5-vvqj",
+    "GHSA-cj7v-w2c7-cp7c",
+    "GHSA-f23m-r3pf-42rh",
+    "GHSA-fjgf-rc76-4x9p",
+    "GHSA-fjxv-7rqg-78g4",
+    "GHSA-fw9q-39r9-c252",
+    "GHSA-g5hg-p3ph-g8qg",
+    "GHSA-gf3v-fwqg-4vh7",
+    "GHSA-grv7-fg5c-xmjg",
+    "GHSA-hc5w-c9f8-9cc4",
+    "GHSA-hmw2-7cc7-3qxx",
+    "GHSA-jc85-fpwf-qm7x",
+    "GHSA-mm7p-fcc7-pg87",
+    "GHSA-mphv-75cg-56wg",
+    "GHSA-p6gq-j5cr-w38f",
+    "GHSA-ph9p-34f9-6g65",
+    "GHSA-q7cg-457f-vx79",
+    "GHSA-qj8w-gfj5-8c6v",
+    "GHSA-qwcr-r2fm-qrc7",
+    "GHSA-r399-636x-v7f6",
+    "GHSA-r5fr-rjxr-66jc",
+    "GHSA-r7g4-qg5f-qqm2",
+    "GHSA-rcmh-qjqh-p98v",
+    "GHSA-rf6f-7fwh-wjgh",
+    "GHSA-rhx6-c78j-4q9w",
+    "GHSA-rr7j-v2q5-chgv",
+    "GHSA-v6c2-xwv6-8xf7",
+    "GHSA-vghf-hv5q-vc2g",
+    "GHSA-vvjj-xcjg-gr5g",
+    "GHSA-w5hq-g745-h8pq",
+    "GHSA-wqvq-jvpq-h66f",
+    "GHSA-xxjr-mmjv-4gpg"
+  ]
+}

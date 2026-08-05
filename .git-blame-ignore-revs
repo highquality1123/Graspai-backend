@@ -1,0 +1,11 @@
+# Révisions à ignorer dans `git blame` (reformatages massifs qui ne changent pas la logique).
+#
+# GitHub applique automatiquement ce fichier s'il est à la racine du repo.
+# En local, activer une fois :  git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# Ajouter ici, une par ligne, la SHA complète (40 caractères) de tout commit de
+# reformatage pur — notamment la future normalisation globale CRLF -> LF. Ainsi
+# `git blame` continuera de pointer sur l'auteur logique de chaque ligne.
+#
+# Exemple :
+# 0000000000000000000000000000000000000000  # chore: normalize line endings CRLF -> LF (repo-wide)

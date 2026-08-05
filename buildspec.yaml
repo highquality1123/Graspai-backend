@@ -1,0 +1,36 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 20.10.0
+
+  build:
+    commands:
+      - echo login to Dockerhub to avoid pull limit issues
+      - echo $DOCKER_PASS | docker login -u$DOCKER_USER --password-stdin
+
+      # Login to Docker image repo (ECR)
+      - echo Logging in to Amazon ECR...
+      - aws --version
+      - DOCKER_REPOSITORY_URI=$DOCKER_REPOSITORY_HOST/graspr-backend
+      - echo $DOCKER_REPOSITORY_URI
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $DOCKER_REPOSITORY_HOST
+
+      # Setting image tag for deployment configuration unique for every build
+      - IMAGE_TAG=build-$(echo $CODEBUILD_BUILD_ID | awk -F":" '{print $2}')
+      - echo $IMAGE_TAG
+
+      # Main docker image build
+      - docker build -t $DOCKER_REPOSITORY_URI:$IMAGE_TAG .
+
+      - echo Pushing the Docker images...
+      - docker push $DOCKER_REPOSITORY_URI:$IMAGE_TAG
+
+      - sed -i "s/<IMAGE_TAG>/$IMAGE_TAG/g" Dockerrun.aws.json
+      - sed -i "s/<DOCKER_REPOSITORY_HOST>/$DOCKER_REPOSITORY_HOST/g" Dockerrun.aws.json
+
+artifacts:
+  files:
+    - Dockerrun.aws.json
+    - .platform/nginx/conf.d/graspr.conf

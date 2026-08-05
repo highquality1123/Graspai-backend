@@ -1,0 +1,13 @@
+# This file instructs Redocly's linter to ignore the rules contained for specific parts of your API.
+# See https://redocly.com/docs/cli/ — entrées AJOUTÉES MANUELLEMENT et JUSTIFIÉES uniquement.
+openapi.yaml:
+  no-unused-components:
+    # ChatStreamEvent est référencé via l'extension x-sse-event-schema des réponses
+    # text/event-stream (POST …/chat/source et POST /chat/general) — OpenAPI ne sait pas
+    # typer nativement le payload des events SSE, l'extension est le lien. Pas du code mort.
+    - "#/components/schemas/ChatStreamEvent"
+openapi.en.yaml:
+  no-unused-components:
+    # Même justification que openapi.yaml (jumeau EN dérivé) : ChatStreamEvent est
+    # référencé via x-sse-event-schema, invisible pour le linter. Pas du code mort.
+    - "#/components/schemas/ChatStreamEvent"

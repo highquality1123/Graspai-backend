@@ -1,0 +1,12 @@
+{
+  "AWSEBDockerrunVersion": "1",
+  "Image": {
+    "Name": "<DOCKER_REPOSITORY_HOST>/graspr-backend:<IMAGE_TAG>",
+    "Update": "true"
+  },
+  "Ports": [
+    {
+      "ContainerPort": "3100"
+    }
+  ]
+}

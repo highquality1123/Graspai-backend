@@ -1,0 +1,40 @@
+# Normalisation des fins de ligne — stratégie hybride.
+#
+# Effet :
+#  - tout NOUVEAU fichier est stocké et extrait en LF (le problème ne grossit plus) ;
+#  - un fichier legacy en CRLF est normalisé en LF au prochain commit qui le TOUCHE
+#    (= au moment de sa migration, gratuit — on édite déjà le fichier) ;
+#  - AUCUNE normalisation globale n'est déclenchée maintenant : les blobs existants
+#    restent inchangés tant qu'on ne les modifie pas (pas de diff de 189 fichiers).
+#
+# Le jour d'une normalisation globale volontaire, référencer le commit dans
+# .git-blame-ignore-revs pour préserver le blame.
+
+* text=auto eol=lf
+
+# Code / config — toujours LF
+*.ts    text eol=lf
+*.tsx   text eol=lf
+*.js    text eol=lf
+*.mjs   text eol=lf
+*.cjs   text eol=lf
+*.json  text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.md    text eol=lf
+*.sql   text eol=lf
+*.sh    text eol=lf
+*.env   text eol=lf
+.env.example text eol=lf
+Dockerfile   text eol=lf
+
+# Binaires — jamais de conversion
+*.pdf   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary

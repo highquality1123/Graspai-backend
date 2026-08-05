@@ -1,0 +1,2300 @@
+openapi: 3.1.0
+
+info:
+  title: Graspr API — Contrat V2
+  version: 1.0.0-draft.1
+  license:
+    name: Proprietary — © Kernos Technologie
+    url: https://graspr.ai
+  summary: Contrat d'API contract-first du backend Graspr V2 (NestJS). Gelé par tranches ; tranche Phase 1 d'abord.
+  description: |
+    # Conventions (gelées — `docs/api-contract-plan.md` §5)
+
+    Ce document est la **source de vérité unique** entre le backend NestJS et le front Next.js.
+    Le code se conforme à ce YAML, jamais l'inverse. Version `1.0.0` posée au gel (`git tag contract-v1`).
+
+    ## Authentification
+    - `Authorization: Bearer <supabase-jwt>` sur tous les endpoints (garde globale). Le backend valide
+      le JWT localement (JWKS ou secret partagé selon la configuration du projet Supabase — note
+      d'implémentation, hors contrat) et extrait `sub` (userId) + `email`.
+    - Signup / login / OAuth / OTP = **Supabase SDK côté client** — aucun endpoint backend, hors contrat.
+      Seules exceptions backend : les OAuth **calendrier** (`GET /auth/google-calendar`, `GET /auth/microsoft-calendar`).
+    - Bootstrap profil : création paresseuse par le backend à la première lecture de `GET /users/me` (pas de trigger d'inscription).
+
+    ## Enveloppe & erreurs
+    - Succès = **payload nu** (objet ou tableau), jamais de wrapper `{data:…}`.
+    - `201` sur création avec la ressource en corps ; `204 No Content` sur suppression / action sans corps.
+    - Erreur = `{ "message": string, "code": string }` — `message` affichable, `code` en `SNAKE_CASE` stable.
+      Statuts : `400` (requête invalide) · `401` (token absent/invalide) · `403` (quota/permission) ·
+      `404` · `409` (conflit d'état) · `422` (validation) · `429` (rate limit) · `500`.
+
+    ## Nommage & IDs
+    - Ressources au pluriel, chemins kebab-case, champs `camelCase`, IDs `uuid`.
+    - `container → notebook` partout (le renommage DB interne suivra ; le contrat ne connaît que `notebook`).
+    - Dates ISO-8601 UTC (`date-time`) ; heures `HH:mm` ; `timezone` IANA explicite envoyé par le client
+      pour tout scheduling.
+
+    ## Pagination
+    - Listes bornées (arbre notebooks, friends…) → **tableau nu**.
+    - Listes non bornées (messages, notifications, historique de chat…) →
+      `{ "items": T[], "nextCursor": string | null }` avec `?limit=&cursor=`.
+
+    ## Suppression (sémantique gelée)
+    - `DELETE /notebooks/:id` = **soft-delete** : la ligne passe en `deletedAt`, toutes les listes filtrent
+      `deletedAt IS NULL`. (Documents/notes suivront la même logique à terme ; gelé pour notebooks dès la Phase 1.)
+
+    ## Pattern asynchrone (unifié)
+    - `POST …/generate` (et ingestion documents) → `202 Accepted` + `{ "jobId": string, "estimatedSeconds": number }`.
+    - Polling **unifié** : `GET /jobs/:jobId` → schéma `Job`. Aucune route de job par ressource.
+    - `status ∈ pending | processing | ready | failed` — vocabulaire unique dans tout le contrat.
+      Pour l'ingestion documents, un champ optionnel `stage ∈ transcribing | chunking | indexing`
+      précise l'étape pendant `processing` (informatif, jamais requis pour la navigation).
+    - Option (non requise v1) : push WebSocket `{ "type": "job.complete", "jobId": …, "resourceId": … }`.
+
+    ## Streaming SSE (chat) — convention
+    Les endpoints de chat répondent en `Content-Type: text/event-stream` (POST + corps JSON) :
+    ```
+    data: {"type":"token","content":"…"}\n\n
+    data: {"type":"citations","citations":[Citation…]}\n\n
+    data: {"type":"done","messageId":"<uuid>"}\n\n
+    data: [DONE]
+    ```
+    - `token` : fragment de texte à concaténer, dans l'ordre.
+    - `citations` : émis une fois, avant `done`, en mode source uniquement.
+    - `done` : terminal, porte l'id du message persisté. La sentinelle `[DONE]` est acceptée après `done`.
+    - Erreur en cours de flux : `data: {"type":"error","message":…,"code":…}` puis fermeture.
+
+    ## WebSocket — annexe (tranche 2)
+    Un seul socket **WebSocket natif** (pas Socket.io) : `WS_URL?token=<jwt>`. Enveloppe `{ "type": string, …payload }`.
+    Namespaces : `message.*`, `typing.*`, `thread.*`, `quiz_war.*`, `job.complete`.
+    ⚠️ Token en query string = faiblesse connue, acceptée v1, à durcir (ticket ouvert).
+    Le catalogue d'événements complet sera annexé avec la tranche messaging / Quiz War.
+    Le gateway Socket.io existant (ancien chat) reste en service hors `/v1` jusqu'à remplacement complet ; il n'est pas au contrat.
+
+    ## Hors contrat / hors `/v1`
+    - `GET /health/check` (sonde Elastic Beanstalk) et `POST /stripe/webhook` (signature Stripe) restent à la racine.
+    - Les routes legacy `/auth/*` et l'API racine actuelle restent servies hors `/v1` pour les clients existants.
+    - Domaine **recording** différé (hors Phase 1) — rappel : `recording_chunks.id` numérique, exception à la
+      convention UUID à résoudre quand ce domaine entrera au contrat.
+
+    ## Traçabilité
+    Chaque opération porte deux extensions :
+    - `x-status` : `exist` | `adapt` | `new` — statut de réconciliation vis-à-vis du backend réel
+      (règles : `docs/api-contract-inventory.md` §0).
+    - `x-source` : ancrage — route réelle (`fichier:ligne`) et/ou section du SOP front, et/ou décision actée.
+
+servers:
+  - url: https://api.graspr.ai/v1
+    description: Production. Le préfixe /v1 est absorbé dans la base URL du front (NEXT_PUBLIC_API_URL).
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Users
+    description: Profil de l'utilisateur courant, préférences, amis, sessions. Phase 1.
+  - name: Notebooks
+    description: Hiérarchie de travail — notebooks (ex-containers) groupés en dossiers. Phase 1.
+  - name: Folders
+    description: Dossiers de regroupement des notebooks (sidebar). Phase 1.
+  - name: Documents
+    description: Sources d'un notebook — upload, ingestion asynchrone, statut, preview. Phase 1.
+  - name: Jobs
+    description: Polling unifié des traitements asynchrones. Phase 1.
+  - name: Notes
+    description: Notes manuelles rattachées à un notebook. Phase 1.
+  - name: Calendar
+    description: Planning d'étude — événements, récurrence, connexions Google/Outlook. Phase 1.
+  - name: Study Sessions
+    description: Journalisation du temps d'étude (focus timer). Phase 1.
+  - name: Search
+    description: Recherche globale notebooks / documents / notes. Phase 1.
+  - name: Chat
+    description: Chat AI — mode source (RAG, notebook-scoped) et mode général. Streaming SSE. Phase 1.
+  - name: Summaries
+    description: Résumés AI de documents d'un notebook — génération asynchrone. Phase 1.
+
+paths:
+  # ───────────────────────────────────────────────────────────────────────────
+  # Domaine — Notebooks & Folders (Phase 1)
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /notebooks:
+    get:
+      tags: [Notebooks]
+      operationId: listNotebooks
+      summary: Arbre des notebooks groupés par dossiers (sidebar)
+      description: |
+        Liste bornée → payload nu. Les notebooks soft-supprimés (`deletedAt` non nul) sont exclus.
+        Note de forme : le SOP type la réponse `NotebookFolder[]` mais l'arbre réel comporte aussi des
+        notebooks à la racine (hors dossier) — la réponse expose les deux (`folders` + `rootNotebooks`).
+      x-status: adapt
+      x-source: "GET /folders/tree — folders.controller.ts:18 (vue user_folder_tree_view) · SOP §1.3.4, §4.3"
+      responses:
+        "200":
+          description: Arbre complet de l'utilisateur.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotebookTree" }
+              example:
+                folders:
+                  - id: "3f8e2b1a-6c4d-4a2e-9b7f-1d5c8a9e0f21"
+                    label: "Human Body"
+                    notebooks:
+                      - id: "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+                        title: "Heart"
+                        pinned: true
+                        documentCount: 12
+                        lastAccessedAt: "2026-07-18T09:24:00Z"
+                      - id: "550e8400-e29b-41d4-a716-446655440000"
+                        title: "Brain"
+                        pinned: false
+                        documentCount: 7
+                        lastAccessedAt: "2026-07-15T16:40:00Z"
+                  - id: "9b2fb8c1-3d5e-47a0-8f6c-2e4a7d1b9c30"
+                    label: "Physics"
+                    notebooks:
+                      - id: "16fd2706-8baf-433b-82eb-8c7fada847da"
+                        title: "Molecules"
+                        pinned: false
+                        documentCount: 3
+                        lastAccessedAt: "2026-07-02T11:05:00Z"
+                rootNotebooks:
+                  - id: "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+                    title: "Pathophysiology"
+                    pinned: true
+                    documentCount: 9
+                    lastAccessedAt: "2026-07-19T20:12:00Z"
+                  - id: "6ba7b811-9dad-11d1-80b4-00c04fd430c8"
+                    title: "Neuroscience"
+                    pinned: false
+                    documentCount: 4
+                    lastAccessedAt: null
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [Notebooks]
+      operationId: createNotebook
+      summary: Créer un notebook
+      x-status: adapt
+      x-source: "POST /containers/empty — containers.controller.ts:39 · SOP §1.3.4, §1.4.1"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateNotebookRequest" }
+      responses:
+        "201":
+          description: Notebook créé.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Notebook" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+
+  /notebooks/{notebookId}:
+    parameters:
+      - $ref: "#/components/parameters/notebookId"
+    get:
+      tags: [Notebooks]
+      operationId: getNotebook
+      summary: Détail d'un notebook (avec ses documents)
+      x-status: exist
+      x-source: "GET /containers/:containerId — containers.controller.ts:19 · SOP §1.4.2"
+      responses:
+        "200":
+          description: Notebook + documents ingérés.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotebookDetail" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Notebooks]
+      operationId: updateNotebook
+      summary: Renommer / modifier un notebook
+      x-status: adapt
+      x-source: "PUT /containers/:containerId — containers.controller.ts:56 · SOP §1.3.4"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateNotebookRequest" }
+      responses:
+        "200":
+          description: Notebook mis à jour.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Notebook" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+    delete:
+      tags: [Notebooks]
+      operationId: deleteNotebook
+      summary: Supprimer un notebook (soft-delete)
+      description: |
+        **Soft-delete gelé** : pose `deletedAt` ; le notebook disparaît de toutes les listes
+        (`deletedAt IS NULL`). Les ressources filles (documents, notes, chats…) cessent d'être servies.
+        Pas d'endpoint de restauration en v1.
+      x-status: adapt
+      x-source: "DELETE /containers/:containerId — containers.controller.ts:92 (aujourd'hui hard delete + cascade) · SOP §1.3.4 · décision go Goal 2 pt 6"
+      responses:
+        "204": { description: Supprimé. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /notebooks/{notebookId}/pin:
+    parameters:
+      - $ref: "#/components/parameters/notebookId"
+    patch:
+      tags: [Notebooks]
+      operationId: togglePinNotebook
+      summary: Épingler / désépingler un notebook (toggle)
+      x-status: new
+      x-source: "SOP §1.3.4 (aucune colonne pinned aujourd'hui)"
+      responses:
+        "200":
+          description: Notebook avec `pinned` inversé.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Notebook" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /notebooks/{notebookId}/move:
+    parameters:
+      - $ref: "#/components/parameters/notebookId"
+    patch:
+      tags: [Notebooks]
+      operationId: moveNotebook
+      summary: Déplacer un notebook vers un dossier (ou la racine)
+      x-status: adapt
+      x-source: "PUT /containers/:containerId/move — containers.controller.ts:74 · arbitrage go Goal 2 pt 2"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [folderId]
+              properties:
+                folderId:
+                  type: [string, "null"]
+                  format: uuid
+                  description: Dossier cible ; `null` = racine.
+      responses:
+        "200":
+          description: Notebook déplacé.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Notebook" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /folders:
+    post:
+      tags: [Folders]
+      operationId: createFolder
+      summary: Créer un dossier
+      description: |
+        L'existant accepte `container_ids[]` au moment de la création ; le contrat sépare —
+        création du dossier seul, puis rattachement via `PATCH /notebooks/:id/move`.
+      x-status: adapt
+      x-source: "POST /folders — folders.controller.ts:46 · SOP §1.3.4 (sidebar) · arbitrage go Goal 2 pt 2"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [label]
+              properties:
+                label: { type: string, minLength: 1, maxLength: 120 }
+      responses:
+        "201":
+          description: Dossier créé.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Folder" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+
+  /folders/{folderId}:
+    parameters:
+      - name: folderId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    patch:
+      tags: [Folders]
+      operationId: updateFolder
+      summary: Renommer un dossier
+      x-status: adapt
+      x-source: "PUT /folders/:folderId — folders.controller.ts:63 (renvoie {success,message} aujourd'hui) · arbitrage go Goal 2 pt 2"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [label]
+              properties:
+                label: { type: string, minLength: 1, maxLength: 120 }
+      responses:
+        "200":
+          description: Dossier mis à jour.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Folder" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+    delete:
+      tags: [Folders]
+      operationId: deleteFolder
+      summary: Supprimer un dossier (les notebooks retournent à la racine)
+      description: |
+        **DÉTACHEMENT, PAS une suppression du contenu.** Seul le dossier (le groupe du sidebar) est supprimé ;
+        ses notebooks sont détachés (`folderId = null`) et réapparaissent dans `rootNotebooks` — aucun notebook,
+        document, note ou autre contenu n'est supprimé ni altéré. L'UX de confirmation côté front doit refléter
+        cette sémantique (pas d'avertissement de perte de données).
+
+        Note : diverge volontairement du code actuel, qui supprime le dossier **en cascade avec ses
+        containers** (`folders.controller.ts:81`) — le contrat gèle le comportement non destructif.
+      x-status: adapt
+      x-source: "DELETE /folders/:folderId — folders.controller.ts:81 · décision validée (go checkpoint 1, pt 2)"
+      responses:
+        "204": { description: "Dossier supprimé, notebooks détachés à la racine." }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Domaine — Users & me (Phase 1)
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /users/me:
+    get:
+      tags: [Users]
+      operationId: getMe
+      summary: Profil de l'utilisateur courant
+      x-status: adapt
+      x-source: "GET /auth/getUser — auth.controller.ts:291 · SOP §1.6.1, Appendix C"
+      responses:
+        "200":
+          description: >
+            Profil courant. Bootstrapé par le backend à la première lecture si absent
+            (création paresseuse idempotente — il n'existe pas de trigger d'inscription).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserProfile" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    patch:
+      tags: [Users]
+      operationId: updateMe
+      summary: Mettre à jour le profil
+      description: >
+        Le changement d'email est propagé à Supabase Auth (source de vérité des identités) —
+        note d'implémentation, transparent pour le front.
+        v1 : le changement d'email n'est pas encore disponible (renvoie 422) — il arrive avec
+        la propagation Supabase Auth.
+      x-status: new
+      x-source: "SOP §1.6.1, §1.2 (aucun endpoint de mise à jour de profil dans src/)"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateUserProfileRequest" }
+      responses:
+        "200":
+          description: Profil mis à jour.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserProfile" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+    delete:
+      tags: [Users]
+      operationId: deleteMe
+      summary: Supprimer le compte
+      description: Suppression du compte et des données associées. Le front exige une re-confirmation avant l'appel (SOP §1.6.5).
+      x-status: new
+      x-source: "SOP §1.6.5"
+      responses:
+        "204": { description: Compte supprimé. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /users/me/onboarding:
+    post:
+      tags: [Users]
+      operationId: saveOnboarding
+      summary: Enregistrer les préférences du wizard d'onboarding
+      description: >
+        Appel unique à la complétion du wizard (5 étapes). Les invitations (`invitedEmails`)
+        sont envoyées côté backend. **Contrainte d'implémentation actée** : ce fan-out et le
+        futur domaine `/invites/*` (tranche 2) doivent partager la MÊME logique d'invitation —
+        pas deux implémentations divergentes.
+      x-status: new
+      x-source: "SOP §1.2 (aucune colonne pour ces champs aujourd'hui)"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OnboardingRequest" }
+      responses:
+        "204": { description: Préférences enregistrées. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+
+  /users/me/change-password:
+    post:
+      tags: [Users]
+      operationId: changePassword
+      summary: Changer le mot de passe (authentifié)
+      description: >
+        Changement authentifié avec vérification du mot de passe courant. Distinct du flux
+        « mot de passe oublié » (Supabase SDK côté client, hors contrat).
+      x-status: new
+      x-source: "SOP §1.6.1 (le flux OTP existant /auth/resetPassword — auth.controller.ts:264 — a une sémantique différente, legacy hors /v1)"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword, newPassword]
+              properties:
+                currentPassword: { type: string }
+                newPassword: { type: string, minLength: 6 }
+      responses:
+        "204": { description: Mot de passe changé. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: Mot de passe courant incorrect.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { message: "Current password is incorrect", code: "INVALID_CREDENTIALS" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+
+  /users/me/notification-preferences:
+    get:
+      tags: [Users]
+      operationId: getNotificationPreferences
+      summary: Préférences de notification
+      x-status: new
+      x-source: "SOP §1.6.2 (aucun module notifications)"
+      responses:
+        "200":
+          description: Les 7 types avec leur canal.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotificationPreferences" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    patch:
+      tags: [Users]
+      operationId: updateNotificationPreferences
+      summary: Mettre à jour les préférences de notification
+      description: Mise à jour partielle — seuls les types envoyés sont modifiés.
+      x-status: new
+      x-source: "SOP §1.6.2"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NotificationPreferences" }
+      responses:
+        "200":
+          description: Préférences mises à jour (état complet).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotificationPreferences" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+
+  /users/me/streak:
+    get:
+      tags: [Users]
+      operationId: getStreak
+      summary: Streak d'étude (heatmap du dashboard)
+      x-status: new
+      x-source: "SOP §1.3.1 (aucune table streak/activité — PLAN_TRAVAIL_V2 §18 greenfield)"
+      responses:
+        "200":
+          description: Streak courant + activité quotidienne.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StudyStreak" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /users/me/progress:
+    get:
+      tags: [Users]
+      operationId: getProgress
+      summary: Progression par topic (radar chart du dashboard)
+      description: >
+        Forme gelée dès la Phase 1 ; tableau vide toléré au lancement — le scoring de maîtrise
+        arrive en Phase 2 (même logique que `GET /notebooks/:id/stats`).
+      x-status: new
+      x-source: "SOP §1.3.3 (aucun modèle de maîtrise — PLAN_TRAVAIL_V2 §16) · arbitrage go Goal 2 pt 7"
+      responses:
+        "200":
+          description: Liste bornée → tableau nu.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/TopicProgress" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /users/me/friends:
+    get:
+      tags: [Users]
+      operationId: listFriends
+      summary: Liste d'amis
+      x-status: new
+      x-source: "SOP §1.6.3 (aucun modèle d'amis/relations)"
+      responses:
+        "200":
+          description: Liste bornée → tableau nu.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Friend" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /users/me/friends/{friendId}:
+    delete:
+      tags: [Users]
+      operationId: removeFriend
+      summary: Retirer un ami
+      x-status: new
+      x-source: "SOP §1.6.3"
+      parameters:
+        - name: friendId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "204": { description: Ami retiré. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /users/me/friends/{requestId}/accept:
+    post:
+      tags: [Users]
+      operationId: acceptFriendRequest
+      summary: Accepter une demande d'ami
+      x-status: new
+      x-source: "SOP §1.6.3"
+      parameters:
+        - name: requestId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Demande acceptée.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Friend" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /users/me/sessions:
+    get:
+      tags: [Users]
+      operationId: listSessions
+      summary: Sessions actives (appareils connectés)
+      x-status: new
+      x-source: "SOP §1.6.5 (aucune gestion de sessions applicatives — s'appuiera sur les sessions Supabase Auth)"
+      responses:
+        "200":
+          description: Liste bornée → tableau nu.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/UserSession" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /users/me/sessions/{sessionId}:
+    delete:
+      tags: [Users]
+      operationId: revokeSession
+      summary: Révoquer une session
+      x-status: new
+      x-source: "SOP §1.6.5"
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: Session révoquée. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /users/{userId}/contact-info:
+    get:
+      tags: [Users]
+      operationId: getContactInfo
+      summary: Fiche contact d'un autre utilisateur
+      description: Accessible uniquement pour un ami ou un membre d'un thread commun.
+      x-status: new
+      x-source: "SOP §2.6 (dépend du modèle d'amis, inexistant)"
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Informations de contact.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ContactInfo" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Domaine — Documents & ingestion (Phase 1)
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /notebooks/{notebookId}/documents:
+    parameters:
+      - $ref: "#/components/parameters/notebookId"
+    get:
+      tags: [Documents]
+      operationId: listDocuments
+      summary: Documents ingérés d'un notebook
+      x-status: adapt
+      x-source: "GET /containers/:containerId — containers.controller.ts:19 (docs inclus) · GET /documents — documents.controller.ts:33 · SOP §1.4.2, §4.4"
+      responses:
+        "200":
+          description: Liste bornée → tableau nu. Inclut les documents en cours d'ingestion (`processingStatus`).
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/NotebookDocument" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Documents]
+      operationId: uploadDocument
+      summary: Uploader un document (ingestion asynchrone)
+      description: |
+        Le document est créé immédiatement (`processingStatus: pending`) et l'ingestion
+        (extraction → chunking → embeddings) part en job. Polling au choix : `GET /jobs/:jobId`
+        (unifié) ou `GET …/documents/:docId/status` (shape ingestion avec `stage`).
+        v1 : le gating premium/quota n'est pas encore appliqué — le 403 est déclaré pour
+        le client généré, il n'est pas émis aujourd'hui.
+      x-status: adapt
+      x-source: "POST /documents — documents.controller.ts:72 (aujourd'hui synchrone dans la requête — documents.service.ts:59-127 ; vidéo fichier « Not implemented » — documents.service.ts:179) · SOP §1.4.1, §4.4"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, kind]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                kind: { $ref: "#/components/schemas/DocumentKind" }
+                label:
+                  type: string
+                  description: Nom d'affichage ; défaut = nom du fichier.
+                language:
+                  type: string
+                  description: ISO 639-1 (en, fr, it, es, de, da, pt, nb).
+      responses:
+        "202":
+          description: Ingestion acceptée.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DocumentJobAccepted" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+
+  /notebooks/{notebookId}/documents/url:
+    parameters:
+      - $ref: "#/components/parameters/notebookId"
+    post:
+      tags: [Documents]
+      operationId: ingestUrl
+      summary: Ingérer une URL (YouTube ou page web)
+      description: >
+        YouTube = transcript ; page web = scraping du contenu (nouveau). Même pipeline
+        asynchrone que l'upload. v1 : YouTube uniquement — une URL de page web renvoie
+        422 (UNSUPPORTED_URL) en attendant le scraping, planifié. Le gating premium/quota
+        n'est pas encore appliqué — le 403 est déclaré pour le client généré, non émis.
+      x-status: adapt
+      x-source: "POST /video — video.controller.ts:16 (YouTube seul, synchrone, en/fr — video.service.ts:72-149 ; scraping web = new) · SOP §1.4.1, §4.4"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url: { type: string, format: uri }
+      responses:
+        "202":
+          description: Ingestion acceptée.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DocumentJobAccepted" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+
+  /notebooks/{notebookId}/documents/{documentId}:
+    parameters:
+      - $ref: "#/components/parameters/notebookId"
+      - $ref: "#/components/parameters/documentId"
+    patch:
+      tags: [Documents]
+      operationId: updateDocument
+      summary: Renommer un document
+      x-status: adapt
+      x-source: "PUT /documents/:documentId — documents.controller.ts:131 · arbitrage go Goal 2 pt 5"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [label]
+              properties:
+                label: { type: string, minLength: 1, maxLength: 200 }
+      responses:
+        "200":
+          description: Document renommé.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotebookDocument" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+    delete:
+      tags: [Documents]
+      operationId: deleteDocument
+      summary: Supprimer un document (et son index)
+      description: >
+        **Suppression IRRÉVERSIBLE** — le document, son index (embeddings, chapitres) ET,
+        en l'état actuel du modèle de données, les ressources qui y sont rattachées
+        (notes, conversations, quiz, flashcards, vidéos générées) sont détruits, aucune
+        restauration possible. Le front DOIT afficher une confirmation explicitant cette portée.
+        Décision consciente (pas un oubli) : le soft-delete n'est gelé que pour les notebooks
+        en v1 ; documents/notes pourront s'aligner plus tard.
+      x-status: exist
+      x-source: "DELETE /documents/:documentId — documents.controller.ts:149 · SOP §3.8"
+      responses:
+        "204": { description: Document et embeddings supprimés. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /notebooks/{notebookId}/documents/{documentId}/status:
+    parameters:
+      - $ref: "#/components/parameters/notebookId"
+      - $ref: "#/components/parameters/documentId"
+    get:
+      tags: [Documents]
+      operationId: getDocumentStatus
+      summary: Statut d'ingestion d'un document
+      description: >
+        Shape ingestion (SOP §3.8) contraint au vocabulaire unifié — `status` 4 états +
+        `stage` informatif pendant `processing` (décision Goal 0 pt 2).
+      x-status: new
+      x-source: "SOP §3.8, §4.4 (aucune colonne de statut aujourd'hui — readiness inférée du filtre ≥1 embedding, documents.service.ts:37-54)"
+      responses:
+        "200":
+          description: Statut courant.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DocumentProcessingStatus" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /notebooks/{notebookId}/documents/{documentId}/preview:
+    parameters:
+      - $ref: "#/components/parameters/notebookId"
+      - $ref: "#/components/parameters/documentId"
+    get:
+      tags: [Documents]
+      operationId: getDocumentPreview
+      summary: Preview d'un document (URL viewer PDF ou transcript)
+      x-status: adapt
+      x-source: "GET /documents/:documentId — documents.controller.ts:52 (renvoie pages {content,start,end} + chapters pour audio/vidéo) · SOP §3.8"
+      responses:
+        "200":
+          description: Contenu de preview selon le `kind`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DocumentPreview" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Domaine — Jobs unifiés (Phase 1, socle transverse)
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /jobs/{jobId}:
+    get:
+      tags: [Jobs]
+      operationId: getJob
+      summary: État d'un traitement asynchrone (polling unifié)
+      description: >
+        Route de polling **unique** pour toutes les générations et l'ingestion. Les routes par
+        ressource du SOP Appendix B (`/quiz/jobs/:id`…) sont superseded — le hook front réel
+        (`use-ai-job.ts`) pointe déjà ici. Intervalle recommandé : 2–5 s.
+      x-status: new
+      x-source: "SOP §4.4 (hook use-ai-job.ts, fetch `/jobs/${jobId}`) · plan §5.5 (aucune infra job dans src/ — tout synchrone aujourd'hui, generated-videos.service.ts:76)"
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: État courant du job.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Domaine — Notes (Phase 1)
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /notebooks/{notebookId}/notes:
+    parameters:
+      - $ref: "#/components/parameters/notebookId"
+    get:
+      tags: [Notes]
+      operationId: listNotes
+      summary: Notes d'un notebook
+      x-status: exist
+      x-source: "GET /notes/containers/:containerId — notes.controller.ts:146 · SOP §1.4.3"
+      responses:
+        "200":
+          description: Liste bornée → tableau nu (tri updatedAt desc).
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Note" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Notes]
+      operationId: createNote
+      summary: Créer une note
+      x-status: adapt
+      x-source: "POST /notes — notes.controller.ts:43 (containerId en body ; sourceDocumentId non persisté aujourd'hui — bug ticketé, inventaire §E) · SOP §1.4.3"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateNoteRequest" }
+      responses:
+        "201":
+          description: Note créée.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Note" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+
+  /notebooks/{notebookId}/notes/{noteId}:
+    parameters:
+      - $ref: "#/components/parameters/notebookId"
+      - $ref: "#/components/parameters/noteId"
+    get:
+      tags: [Notes]
+      operationId: getNote
+      summary: Détail d'une note
+      x-status: exist
+      x-source: "GET /notes/:noteId — notes.controller.ts:17 · SOP §1.4.3 (implicite éditeur, confirmé Goal 1 §C)"
+      responses:
+        "200":
+          description: Note.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Note" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Notes]
+      operationId: updateNote
+      summary: Modifier une note
+      x-status: adapt
+      x-source: "PUT /notes — notes.controller.ts:83 (id en body aujourd'hui) · SOP §1.4.3"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                title: { type: string, maxLength: 300 }
+                body: { type: string }
+      responses:
+        "200":
+          description: Note mise à jour.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Note" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+    delete:
+      tags: [Notes]
+      operationId: deleteNote
+      summary: Supprimer une note
+      x-status: exist
+      x-source: "DELETE /notes/:noteId — notes.controller.ts:172 · SOP §1.4.3"
+      responses:
+        "204": { description: Note supprimée. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Domaine — Calendar (Phase 1)
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /calendar/events:
+    get:
+      tags: [Calendar]
+      operationId: listCalendarEvents
+      summary: Événements sur une plage de dates
+      x-status: new
+      x-source: "SOP §1.5.1 (aucun module calendar dans src/)"
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          required: true
+          schema: { type: string, format: date }
+      responses:
+        "200":
+          description: Liste bornée par la plage → tableau nu.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/CalendarEvent" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [Calendar]
+      operationId: createCalendarEvent
+      summary: Créer un événement ou une série récurrente
+      description: >
+        `recurrence: none` crée une occurrence unique ; `daily`/`weekly` crée une série
+        (jusqu'à `endDate`, `includeWeekends` s'applique à `daily`). La réponse renvoie les
+        occurrences créées — tableau nu, une seule entrée si non récurrent.
+      x-status: new
+      x-source: "SOP §1.5.2 (payload CalendarAddCoursePayload) · plan §5.9 (timezone explicite)"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateCalendarEventRequest" }
+      responses:
+        "201":
+          description: Occurrence(s) créée(s).
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/CalendarEvent" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+
+  /calendar/events/{eventId}:
+    parameters:
+      - name: eventId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [Calendar]
+      operationId: getCalendarEvent
+      summary: Détail d'un événement
+      x-status: new
+      x-source: "SOP §1.5.1"
+      responses:
+        "200":
+          description: Événement.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CalendarEvent" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Calendar]
+      operationId: updateCalendarEvent
+      summary: Modifier un événement (occurrence ou série)
+      x-status: new
+      x-source: "SOP §1.5.1, §1.5.2 (dont marquage completed)"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateCalendarEventRequest" }
+      responses:
+        "200":
+          description: Événement mis à jour.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CalendarEvent" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+    delete:
+      tags: [Calendar]
+      operationId: deleteCalendarEvent
+      summary: Supprimer une occurrence ou la série entière
+      x-status: new
+      x-source: "SOP §1.5.2 (?scope=single|series)"
+      parameters:
+        - name: scope
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [single, series]
+            default: single
+      responses:
+        "204": { description: Supprimé selon le scope. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /calendar/today:
+    get:
+      tags: [Calendar]
+      operationId: getTodaysPlan
+      summary: Plan du jour (carte du dashboard)
+      x-status: new
+      x-source: "SOP §1.3.2"
+      responses:
+        "200":
+          description: Sessions du jour, ordonnées par heure de début.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/TodaysPlanItem" }
+              example:
+                - id: "0d1e2f30-4a5b-4c6d-8e9f-a0b1c2d3e4f5"
+                  notebookId: "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+                  notebookTitle: "Heart"
+                  timeLabel: "9:00 AM – 10:00 AM"
+                  color: "#F59E0B"
+                  activeRecall: true
+                  completed: true
+                - id: "1e2f3a40-5b6c-4d7e-9f0a-b1c2d3e4f5a6"
+                  notebookId: "550e8400-e29b-41d4-a716-446655440000"
+                  notebookTitle: "Anatomy"
+                  timeLabel: "11:30 AM – 12:15 PM"
+                  color: "#3B82F6"
+                  activeRecall: false
+                  completed: false
+                - id: "2f3a4b50-6c7d-4e8f-a0b1-c2d3e4f5a6b7"
+                  notebookId: "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+                  notebookTitle: "Pathophysiology"
+                  timeLabel: "3:00 PM – 3:45 PM"
+                  color: "#10B981"
+                  activeRecall: false
+                  completed: false
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /auth/google-calendar:
+    get:
+      tags: [Calendar]
+      operationId: connectGoogleCalendar
+      summary: Démarrer l'OAuth Google Calendar
+      description: >
+        Seul flux OAuth **backend** du contrat (avec Microsoft) — le login OAuth passe par le
+        SDK Supabase côté client. Renvoie l'URL de consentement en `200 {url}` (et non un 302) :
+        en auth Bearer, une navigation navigateur ne peut pas porter le header Authorization —
+        le front appelle en fetch authentifié puis redirige lui-même (`window.location = url`).
+        Le token provider est stocké à l'issue du callback backend.
+      x-status: new
+      x-source: "SOP §1.5.3 · plan §5.8 (le seul OAuth Google existant est le login — auth.service.ts:140, sans scope calendrier)"
+      responses:
+        "200":
+          description: URL de consentement à ouvrir côté front.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [url]
+                properties:
+                  url: { type: string, format: uri }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /auth/microsoft-calendar:
+    get:
+      tags: [Calendar]
+      operationId: connectMicrosoftCalendar
+      summary: Démarrer l'OAuth Outlook / Microsoft Calendar
+      description: "Même mécanique que Google Calendar : `200 {url}`, le front redirige (fetch authentifié, pas de 302)."
+      x-status: new
+      x-source: "SOP §1.5.3 · plan §5.8"
+      responses:
+        "200":
+          description: URL de consentement à ouvrir côté front.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [url]
+                properties:
+                  url: { type: string, format: uri }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /users/me/calendar-connections:
+    get:
+      tags: [Calendar]
+      operationId: listCalendarConnections
+      summary: Connexions calendrier actives
+      x-status: new
+      x-source: "SOP §1.5.3"
+      responses:
+        "200":
+          description: Liste bornée → tableau nu.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/CalendarConnection" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /users/me/calendar-connections/{provider}:
+    delete:
+      tags: [Calendar]
+      operationId: disconnectCalendar
+      summary: Déconnecter un provider calendrier
+      x-status: new
+      x-source: "SOP §1.5.3"
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [google, microsoft]
+      responses:
+        "204": { description: "Provider déconnecté, token révoqué." }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Domaine — Study sessions (Phase 1)
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /study-sessions:
+    post:
+      tags: [Study Sessions]
+      operationId: logStudySession
+      summary: Journaliser une session d'étude (focus timer)
+      description: Alimente le streak (`GET /users/me/streak`) et les stats de temps d'étude.
+      x-status: new
+      x-source: "SOP §1.3.5 (aucune table study_sessions)"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [durationSeconds, completedAt]
+              properties:
+                notebookId:
+                  type: [string, "null"]
+                  format: uuid
+                durationSeconds: { type: integer, minimum: 1, maximum: 86400 }
+                completedAt: { type: string, format: date-time }
+      responses:
+        "201":
+          description: Session enregistrée.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StudySession" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Domaine — Search (Phase 1)
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /search:
+    get:
+      tags: [Search]
+      operationId: globalSearch
+      summary: Recherche globale (top bar)
+      description: >
+        Recherche par nom/titre sur notebooks, documents et notes (full-text simple en Phase 1 —
+        la recherche sémantique cross-document est une brique ultérieure, PLAN_TRAVAIL_V2 §27).
+      x-status: new
+      x-source: "SOP §1.3.6 (aucun endpoint de recherche ; search_vectors est interne et mono-document — ai.service.ts:179)"
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string, minLength: 1 }
+      responses:
+        "200":
+          description: Résultats groupés par type.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SearchResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Domaine — Chat AI (Phase 1, SSE)
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /notebooks/{notebookId}/chat/source:
+    parameters:
+      - $ref: "#/components/parameters/notebookId"
+    post:
+      tags: [Chat]
+      operationId: streamSourceChat
+      summary: Message au chat source (RAG notebook-scoped) — réponse SSE
+      description: |
+        Chat groundé sur les documents du notebook. `documentIds` restreint le retrieval à un
+        sous-ensemble de sources ; absent = tout le notebook. `conversationId` absent = nouveau
+        thread créé implicitement (son id revient dans l'event `done` via le message persisté).
+
+        Réponse en `text/event-stream` — convention SSE en tête de document :
+        `token`* → `citations` (une fois) → `done` → `[DONE]`.
+      x-status: adapt
+      x-source: "POST /chats — chat.controller.ts:23 + POST /chats/:chatId — chat.controller.ts:108 (aujourd'hui : Socket.io non authentifié — stream.gateway.ts:35, mono-document — chats.document_id NOT NULL, search_vectors mono-doc — ai.service.ts:179 ; citations persistées mais jamais renvoyées — chat.service.ts:168) · SOP §3.1, §4.9 · divergence 7 tranchée"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                message: { type: string, minLength: 1 }
+                conversationId:
+                  type: string
+                  format: uuid
+                  description: Thread existant à poursuivre ; absent = nouveau thread.
+                documentIds:
+                  type: array
+                  items: { type: string, format: uuid }
+                  description: Scope du retrieval ; absent = tout le notebook.
+      responses:
+        "200":
+          description: >
+            Flux SSE (convention en tête de document). Chaque ligne `data:` porte un JSON
+            conforme au schéma `ChatStreamEvent` (oneOf discriminé par `type`) :
+            `token`* → `citations` (une fois) → `done`, puis sentinelle `data: [DONE]`.
+            En cas d'échec en cours de flux : event `error` puis fermeture.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: "Suite d'événements `data: {json}\\n\\n`. JSON de chaque event : voir ChatStreamEvent."
+              x-sse-event-schema: "#/components/schemas/ChatStreamEvent"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /chat/general:
+    post:
+      tags: [Chat]
+      operationId: streamGeneralChat
+      summary: Message au chat général (Graspr AI, non groundé) — réponse SSE
+      description: Assistant général sans grounding documentaire. Même convention SSE, sans event `citations`.
+      x-status: new
+      x-source: "SOP §3.1, §4.9 (aucun chat non-groundé aujourd'hui — tous les ChatTypeEnum sont scopés à un document)"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                message: { type: string, minLength: 1 }
+                conversationId:
+                  type: string
+                  format: uuid
+      responses:
+        "200":
+          description: >
+            Flux SSE — `token`* → `done`, sentinelle `[DONE]`. Mêmes schémas d'events que le
+            chat source (`ChatStreamEvent`), sans event `citations`.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              x-sse-event-schema: "#/components/schemas/ChatStreamEvent"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /notebooks/{notebookId}/chat/source/history:
+    parameters:
+      - $ref: "#/components/parameters/notebookId"
+    get:
+      tags: [Chat]
+      operationId: getSourceChatHistory
+      summary: Historique du chat source (paginé)
+      x-status: adapt
+      x-source: "GET /chats/:chatId — chat.controller.ts:154 (aujourd'hui par chat, sans citations ni pagination — chat.service.ts:320-330) · SOP §3.1"
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/cursor"
+        - name: conversationId
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+          description: Filtrer sur un thread ; absent = tout l'historique du notebook.
+      responses:
+        "200":
+          description: Messages du plus récent au plus ancien.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ChatMessagePage" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Chat]
+      operationId: clearSourceChatHistory
+      summary: Vider l'historique du chat source du notebook
+      x-status: adapt
+      x-source: "DELETE /chats/:chatId — chat.controller.ts:184 (aujourd'hui par chat) · SOP §3.1"
+      responses:
+        "204": { description: Historique vidé. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Domaine — Summaries (Phase 1, job async)
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /notebooks/{notebookId}/summaries/generate:
+    parameters:
+      - $ref: "#/components/parameters/notebookId"
+    post:
+      tags: [Summaries]
+      operationId: generateSummary
+      summary: Générer un résumé (asynchrone)
+      description: >
+        Chemin aligné sur le pattern unifié `…/<resource>/generate` (§5.5) — le SOP écrit
+        `POST /notebooks/:id/summary`, ajustement d'une ligne côté front. Plusieurs résumés
+        par notebook autorisés (l'existant en limite un par document — garde levée au contrat).
+        v1 : le gating quota/premium n'est pas encore appliqué — les 403 et 429 sont déclarés
+        pour le client généré, ils ne sont pas émis aujourd'hui.
+      x-status: adapt
+      x-source: "POST /chats/summary — chat.controller.ts:74 (synchrone, mono-document, sans length/format, 1 résumé max — chat.service.ts:69-75,95,103) · SOP §3.4 · plan §5.5"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/GenerateSummaryRequest" }
+      responses:
+        "202":
+          description: "Génération acceptée — `resourceType: summary` au polling."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAccepted" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /notebooks/{notebookId}/summaries:
+    parameters:
+      - $ref: "#/components/parameters/notebookId"
+    get:
+      tags: [Summaries]
+      operationId: listSummaries
+      summary: Résumés d'un notebook
+      x-status: new
+      x-source: "SOP §3.4 (aucune route de liste — le contenu n'est renvoyé que par le POST aujourd'hui ; données présentes dans chats type=summary)"
+      responses:
+        "200":
+          description: Liste bornée → tableau nu (généré le plus récent en premier).
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/NotebookSummary" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /notebooks/{notebookId}/summaries/{summaryId}:
+    parameters:
+      - $ref: "#/components/parameters/notebookId"
+      - name: summaryId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [Summaries]
+      operationId: getSummary
+      summary: Détail d'un résumé
+      x-status: new
+      x-source: "SOP §3.4 (chemin SOP `…/summary/:summaryId` normalisé au pluriel — §5.1)"
+      responses:
+        "200":
+          description: Résumé complet.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotebookSummary" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Summaries]
+      operationId: deleteSummary
+      summary: Supprimer un résumé
+      description: La suppression est aujourd'hui explicitement interdite côté code (`DELETE /chats/:chatId` refuse `type=summary`) — le contrat l'autorise, le code s'adaptera.
+      x-status: new
+      x-source: "SOP §3.4 · inventaire domaine 9"
+      responses:
+        "204": { description: Résumé supprimé. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT de session Supabase. Claims lus par le backend — `sub` (userId), `email`.
+
+  parameters:
+    notebookId:
+      name: notebookId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    limit:
+      name: limit
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      description: Taille de page (listes non bornées).
+    cursor:
+      name: cursor
+      in: query
+      required: false
+      schema: { type: string }
+      description: Curseur opaque renvoyé par `nextCursor`.
+    documentId:
+      name: documentId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    noteId:
+      name: noteId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    BadRequest:
+      description: Requête invalide.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Token absent, invalide ou expiré.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { message: "Invalid or expired token", code: "UNAUTHORIZED" }
+    Forbidden:
+      description: Permission ou quota insuffisant.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { message: "Monthly AI prompt quota exceeded", code: "QUOTA_EXCEEDED" }
+    NotFound:
+      description: Ressource introuvable (ou n'appartenant pas à l'utilisateur).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { message: "Notebook not found", code: "NOT_FOUND" }
+    Conflict:
+      description: Conflit d'état.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    UnprocessableEntity:
+      description: Corps de requête bien formé mais invalide.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { message: "title must not be empty", code: "VALIDATION_FAILED" }
+    TooManyRequests:
+      description: Rate limit atteint.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    # ── Transverses ──────────────────────────────────────────────────────────
+    Error:
+      type: object
+      required: [message, code]
+      properties:
+        message:
+          type: string
+          description: Message lisible, affichable par le front.
+        code:
+          type: string
+          pattern: "^[A-Z0-9_]+$"
+          description: Code machine stable, SNAKE_CASE (ex. `QUOTA_EXCEEDED`, `VALIDATION_FAILED`).
+
+    Page:
+      type: object
+      description: >
+        Enveloppe de pagination par curseur des listes non bornées. Les réponses concrètes
+        spécialisent `items` (ex. `items: ChatMessage[]`).
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items: {}
+        nextCursor:
+          type: [string, "null"]
+          description: Curseur opaque de la page suivante ; `null` = fin de liste.
+
+    JobAccepted:
+      type: object
+      description: Réponse `202 Accepted` de tout déclenchement asynchrone.
+      required: [jobId, estimatedSeconds]
+      properties:
+        jobId: { type: string, format: uuid }
+        estimatedSeconds:
+          type: integer
+          minimum: 1
+          description: Estimation indicative pour calibrer l'UI d'attente.
+
+    JobStatus:
+      type: string
+      enum: [pending, processing, ready, failed]
+      description: Vocabulaire unique de statut asynchrone dans tout le contrat.
+
+    Job:
+      type: object
+      description: État d'un traitement asynchrone — `GET /jobs/:jobId` (polling unifié).
+      required: [jobId, status, resourceType]
+      properties:
+        jobId: { type: string, format: uuid }
+        status: { $ref: "#/components/schemas/JobStatus" }
+        stage:
+          type: string
+          enum: [transcribing, chunking, indexing]
+          description: Étape courante pendant `processing` — ingestion documents uniquement, informatif.
+        resourceType:
+          type: string
+          enum: [document, summary, quiz, flashcards, video, podcast, mindmap]
+        resourceId:
+          type: string
+          format: uuid
+          description: Présent quand `status = ready` — id de la ressource générée à récupérer.
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+        error:
+          type: string
+          description: Message d'échec, présent quand `status = failed`.
+
+    # ── Notebooks & Folders ──────────────────────────────────────────────────
+    Notebook:
+      type: object
+      required: [id, title, folderId, pinned, visibility, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        folderId:
+          type: [string, "null"]
+          format: uuid
+          description: Dossier parent ; `null` = racine.
+        pinned: { type: boolean }
+        visibility:
+          type: string
+          enum: [private, shared]
+          default: private
+        prompt:
+          type: [string, "null"]
+          description: Intention d'étude saisie à la création ("What are we studying today?").
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    NotebookListItem:
+      type: object
+      description: Forme allégée pour le sidebar (SOP §1.3.4).
+      required: [id, title, pinned, documentCount, lastAccessedAt]
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        pinned: { type: boolean }
+        documentCount: { type: integer, minimum: 0 }
+        lastAccessedAt:
+          type: [string, "null"]
+          format: date-time
+
+    NotebookFolder:
+      type: object
+      required: [id, label, notebooks]
+      properties:
+        id: { type: string, format: uuid }
+        label: { type: string }
+        notebooks:
+          type: array
+          items: { $ref: "#/components/schemas/NotebookListItem" }
+
+    NotebookTree:
+      type: object
+      required: [folders, rootNotebooks]
+      properties:
+        folders:
+          type: array
+          items: { $ref: "#/components/schemas/NotebookFolder" }
+        rootNotebooks:
+          type: array
+          items: { $ref: "#/components/schemas/NotebookListItem" }
+
+    NotebookDetail:
+      allOf:
+        - $ref: "#/components/schemas/Notebook"
+        - type: object
+          required: [documents]
+          properties:
+            documents:
+              type: array
+              items: { $ref: "#/components/schemas/NotebookDocument" }
+
+    CreateNotebookRequest:
+      type: object
+      required: [title]
+      properties:
+        title: { type: string, minLength: 1, maxLength: 200 }
+        folderId:
+          type: [string, "null"]
+          format: uuid
+        prompt: { type: string }
+        visibility:
+          type: string
+          enum: [private, shared]
+          default: private
+
+    UpdateNotebookRequest:
+      type: object
+      minProperties: 1
+      properties:
+        title: { type: string, minLength: 1, maxLength: 200 }
+        visibility:
+          type: string
+          enum: [private, shared]
+
+    Folder:
+      type: object
+      required: [id, label, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        label: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    # ── Documents (schéma partagé, exposé par NotebookDetail — domaine complet à venir) ──
+    DocumentKind:
+      type: string
+      enum: [pdf, audio, video, video-overview, recording]
+      description: SOP §1.4.1. `recording` = domaine différé (hors Phase 1), présent pour compat de type.
+
+    NotebookDocument:
+      type: object
+      required: [id, label, kind, uploadedAt, processingStatus]
+      properties:
+        id: { type: string, format: uuid }
+        label: { type: string }
+        kind: { $ref: "#/components/schemas/DocumentKind" }
+        extension: { type: string }
+        uploadedAt: { type: string, format: date-time }
+        processingStatus: { $ref: "#/components/schemas/JobStatus" }
+
+    # ── Users & me ───────────────────────────────────────────────────────────
+    UserProfile:
+      type: object
+      required: [id, email, fullName, onboardingComplete, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        fullName: { type: string }
+        profilePicture:
+          type: [string, "null"]
+          format: uri
+        language:
+          type: [string, "null"]
+          description: ISO 639-1 — préférence d'interface.
+        colorMode:
+          type: [string, "null"]
+          enum: [light, auto, dark, null]
+        onboardingComplete: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    UpdateUserProfileRequest:
+      type: object
+      minProperties: 1
+      properties:
+        fullName: { type: string, minLength: 1, maxLength: 200 }
+        email: { type: string, format: email }
+        language: { type: string }
+        colorMode:
+          type: string
+          enum: [light, auto, dark]
+        onboardingComplete: { type: boolean }
+
+    OnboardingRequest:
+      type: object
+      required: [language, skillArea, learningStyles, studyRhythm]
+      properties:
+        language:
+          type: string
+          enum: [en, fr]
+        skillArea:
+          type: string
+          enum: [academic, professional, creative]
+        learningStyles:
+          type: array
+          items: { type: string }
+        studyRhythm: { type: string }
+        invitedEmails:
+          type: array
+          items: { type: string, format: email }
+          default: []
+
+    NotificationChannel:
+      type: string
+      enum: [email_push, email_only, push_only]
+
+    NotificationPreferences:
+      type: object
+      description: Les 7 types du SOP §1.6.2 — chacun avec son canal de livraison.
+      properties:
+        newMessage: { $ref: "#/components/schemas/NotificationChannel" }
+        quizWarChallenge: { $ref: "#/components/schemas/NotificationChannel" }
+        studyReminder: { $ref: "#/components/schemas/NotificationChannel" }
+        friendJoin: { $ref: "#/components/schemas/NotificationChannel" }
+        teamInvite: { $ref: "#/components/schemas/NotificationChannel" }
+        weeklySummary: { $ref: "#/components/schemas/NotificationChannel" }
+        productUpdates: { $ref: "#/components/schemas/NotificationChannel" }
+
+    StudyStreak:
+      type: object
+      required: [currentStreak, longestStreak, totalDaysStudied, dailyActivity]
+      properties:
+        currentStreak: { type: integer, minimum: 0 }
+        longestStreak: { type: integer, minimum: 0 }
+        totalDaysStudied: { type: integer, minimum: 0 }
+        dailyActivity:
+          type: array
+          items:
+            type: object
+            required: [date, minutesStudied, completed]
+            properties:
+              date: { type: string, format: date }
+              minutesStudied: { type: integer, minimum: 0 }
+              completed: { type: boolean }
+
+    TopicProgress:
+      type: object
+      required: [topicId, label, notebookId, understandingPct, lastActivityAt]
+      properties:
+        topicId: { type: string, format: uuid }
+        label: { type: string }
+        notebookId: { type: string, format: uuid }
+        understandingPct: { type: integer, minimum: 0, maximum: 100 }
+        lastActivityAt: { type: string, format: date-time }
+
+    Friend:
+      type: object
+      required: [userId, displayName, email]
+      properties:
+        userId: { type: string, format: uuid }
+        displayName: { type: string }
+        email: { type: string, format: email }
+        avatarUrl:
+          type: [string, "null"]
+          format: uri
+        friendSince:
+          type: [string, "null"]
+          format: date-time
+
+    UserSession:
+      type: object
+      required: [id, device, lastSeenAt, current]
+      properties:
+        id: { type: string }
+        device: { type: string, description: "Navigateur / OS (user-agent résumé)." }
+        location: { type: [string, "null"] }
+        lastSeenAt: { type: string, format: date-time }
+        current:
+          type: boolean
+          description: Session portant le token de la requête courante.
+
+    ContactInfo:
+      type: object
+      required: [userId, displayName, email, sharedNotebooks, mutualFriends]
+      properties:
+        userId: { type: string, format: uuid }
+        displayName: { type: string }
+        email: { type: string, format: email }
+        avatarUrl:
+          type: [string, "null"]
+          format: uri
+        sharedNotebooks:
+          type: array
+          items:
+            type: object
+            required: [id, title]
+            properties:
+              id: { type: string, format: uuid }
+              title: { type: string }
+        mutualFriends: { type: integer, minimum: 0 }
+        friendSince:
+          type: [string, "null"]
+          format: date-time
+
+    # ── Documents & ingestion ────────────────────────────────────────────────
+    DocumentJobAccepted:
+      description: >
+        Réponse 202 de l'ingestion — le document existe immédiatement (`processingStatus: pending`),
+        `documentId` permet d'afficher la ligne et de poller le statut d'ingestion.
+      allOf:
+        - $ref: "#/components/schemas/JobAccepted"
+        - type: object
+          required: [documentId]
+          properties:
+            documentId: { type: string, format: uuid }
+
+    DocumentProcessingStatus:
+      type: object
+      description: Shape ingestion (SOP §3.8) contraint au vocabulaire unifié + `stage` informatif.
+      required: [documentId, status]
+      properties:
+        documentId: { type: string, format: uuid }
+        status: { $ref: "#/components/schemas/JobStatus" }
+        stage:
+          type: string
+          enum: [transcribing, chunking, indexing]
+          description: Étape courante pendant `processing` (informatif).
+        progress: { type: integer, minimum: 0, maximum: 100 }
+        errorMessage: { type: string }
+        readyAt: { type: string, format: date-time }
+
+    TranscriptSegment:
+      type: object
+      required: [content, start, end]
+      properties:
+        content: { type: string }
+        start: { type: number, description: Secondes. }
+        end: { type: number, description: Secondes. }
+
+    DocumentChapter:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        pageNumber: { type: [integer, "null"] }
+        startSeconds: { type: [number, "null"] }
+
+    DocumentPreview:
+      type: object
+      description: >
+        Contenu selon le `kind` — `pdf`: `url` (URL signée du viewer) ; `audio`/`video`:
+        `transcript` + `chapters`.
+      required: [documentId, kind]
+      properties:
+        documentId: { type: string, format: uuid }
+        kind: { $ref: "#/components/schemas/DocumentKind" }
+        url:
+          type: [string, "null"]
+          format: uri
+        transcript:
+          type: [array, "null"]
+          items: { $ref: "#/components/schemas/TranscriptSegment" }
+        chapters:
+          type: [array, "null"]
+          items: { $ref: "#/components/schemas/DocumentChapter" }
+
+    # ── Notes ────────────────────────────────────────────────────────────────
+    Note:
+      type: object
+      required: [id, notebookId, title, body, sourceDocumentId, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        notebookId: { type: string, format: uuid }
+        title: { type: string }
+        body: { type: string, description: Markdown. }
+        sourceDocumentId:
+          type: [string, "null"]
+          format: uuid
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    CreateNoteRequest:
+      type: object
+      required: [title, body]
+      properties:
+        title: { type: string, minLength: 1, maxLength: 300 }
+        body: { type: string }
+        sourceDocumentId:
+          type: string
+          format: uuid
+
+    # ── Calendar & study sessions ────────────────────────────────────────────
+    CalendarEventParticipant:
+      type: object
+      required: [email]
+      properties:
+        userId:
+          type: [string, "null"]
+          format: uuid
+          description: Renseigné si le participant est un utilisateur Graspr.
+        email: { type: string, format: email }
+        isYou: { type: boolean, default: false }
+
+    CalendarEvent:
+      type: object
+      required: [id, seriesId, title, date, startTime, endTime, color, notebookId, activeRecall, completed, participants]
+      properties:
+        id: { type: string, format: uuid }
+        seriesId:
+          type: [string, "null"]
+          format: uuid
+          description: Présent si l'occurrence appartient à une série récurrente.
+        title: { type: string }
+        date: { type: string, format: date }
+        startTime: { type: string, pattern: "^([01]\\d|2[0-3]):[0-5]\\d$", description: "HH:mm, heure locale du user." }
+        endTime: { type: string, pattern: "^([01]\\d|2[0-3]):[0-5]\\d$" }
+        color:
+          type: string
+          description: "Hex (#RRGGBB) — le front dérive les variantes bar/tint/filled."
+        notebookId:
+          type: [string, "null"]
+          format: uuid
+        activeRecall: { type: boolean }
+        completed: { type: boolean }
+        participants:
+          type: array
+          items: { $ref: "#/components/schemas/CalendarEventParticipant" }
+
+    CreateCalendarEventRequest:
+      type: object
+      required: [title, color, from, to, startDate, timezone]
+      properties:
+        title: { type: string, minLength: 1 }
+        color: { type: string, description: "Hex (#RRGGBB), un des 8 presets front." }
+        from: { type: string, pattern: "^([01]\\d|2[0-3]):[0-5]\\d$" }
+        to: { type: string, pattern: "^([01]\\d|2[0-3]):[0-5]\\d$" }
+        startDate: { type: string, format: date }
+        timezone: { type: string, description: "IANA (ex. Europe/Paris) — obligatoire pour le scheduling (§5.9)." }
+        notebookId:
+          type: [string, "null"]
+          format: uuid
+        activeRecall: { type: boolean, default: false }
+        recurrence:
+          type: string
+          enum: [none, daily, weekly]
+          default: none
+        includeWeekends:
+          type: boolean
+          default: false
+          description: S'applique à `recurrence=daily`.
+        endDate:
+          type: [string, "null"]
+          format: date
+          description: Fin de série (requis si `recurrence` ≠ none).
+        friendIds:
+          type: array
+          items: { type: string, format: uuid }
+          default: []
+
+    UpdateCalendarEventRequest:
+      type: object
+      minProperties: 1
+      properties:
+        title: { type: string }
+        color: { type: string }
+        date: { type: string, format: date }
+        from: { type: string, pattern: "^([01]\\d|2[0-3]):[0-5]\\d$" }
+        to: { type: string, pattern: "^([01]\\d|2[0-3]):[0-5]\\d$" }
+        notebookId:
+          type: [string, "null"]
+          format: uuid
+        activeRecall: { type: boolean }
+        completed: { type: boolean }
+        scope:
+          type: string
+          enum: [single, series]
+          default: single
+          description: Portée de la modification pour une occurrence de série.
+
+    TodaysPlanItem:
+      type: object
+      required: [id, notebookId, notebookTitle, timeLabel, color, activeRecall, completed]
+      properties:
+        id: { type: string, format: uuid }
+        notebookId:
+          type: [string, "null"]
+          format: uuid
+        notebookTitle: { type: [string, "null"] }
+        timeLabel: { type: string, description: "Ex. \"9:00 AM – 10:00 AM\"." }
+        color: { type: string }
+        activeRecall: { type: boolean }
+        completed: { type: boolean }
+
+    CalendarConnection:
+      type: object
+      required: [provider, connectedAt]
+      properties:
+        provider:
+          type: string
+          enum: [google, microsoft]
+        accountEmail: { type: [string, "null"], format: email }
+        connectedAt: { type: string, format: date-time }
+
+    StudySession:
+      type: object
+      required: [id, notebookId, durationSeconds, completedAt, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        notebookId:
+          type: [string, "null"]
+          format: uuid
+        durationSeconds: { type: integer, minimum: 1, maximum: 86400 }
+        completedAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+
+    # ── Search ───────────────────────────────────────────────────────────────
+    SearchResult:
+      type: object
+      required: [notebooks, documents, notes]
+      properties:
+        notebooks:
+          type: array
+          items:
+            type: object
+            required: [id, title]
+            properties:
+              id: { type: string, format: uuid }
+              title: { type: string }
+        documents:
+          type: array
+          items:
+            type: object
+            required: [id, name, notebookId]
+            properties:
+              id: { type: string, format: uuid }
+              name: { type: string }
+              notebookId: { type: string, format: uuid }
+        notes:
+          type: array
+          items:
+            type: object
+            required: [id, excerpt, notebookId]
+            properties:
+              id: { type: string, format: uuid }
+              excerpt: { type: string }
+              notebookId: { type: string, format: uuid }
+
+    # ── Chat AI ──────────────────────────────────────────────────────────────
+    Citation:
+      type: object
+      description: >
+        Grounding d'une réponse — les métadonnées existent déjà à l'ingestion
+        (page_number, start, end — ai.service.ts:100-112).
+      required: [documentId, excerpt]
+      properties:
+        documentId: { type: string, format: uuid }
+        excerpt: { type: string }
+        pageNumber: { type: [integer, "null"] }
+        startSeconds:
+          type: [number, "null"]
+          description: Pour les sources audio/vidéo.
+        endSeconds: { type: [number, "null"] }
+
+    ChatMessage:
+      type: object
+      required: [id, conversationId, role, content, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        conversationId: { type: string, format: uuid }
+        role:
+          type: string
+          enum: [user, assistant]
+        content: { type: string, description: Markdown. }
+        createdAt: { type: string, format: date-time }
+        sourceDocumentIds:
+          type: array
+          items: { type: string, format: uuid }
+          description: Mode source uniquement — documents cités.
+        citations:
+          type: array
+          items: { $ref: "#/components/schemas/Citation" }
+          description: Mode source uniquement, messages assistant.
+
+    ChatMessagePage:
+      allOf:
+        - $ref: "#/components/schemas/Page"
+        - type: object
+          properties:
+            items:
+              type: array
+              items: { $ref: "#/components/schemas/ChatMessage" }
+
+    # ── Events SSE du chat (payload JSON des lignes `data:`) ─────────────────
+    ChatTokenEvent:
+      type: object
+      required: [type, content]
+      properties:
+        type: { const: token }
+        content:
+          type: string
+          description: Fragment de texte à concaténer, dans l'ordre d'arrivée.
+
+    ChatCitationsEvent:
+      type: object
+      description: Émis une seule fois, avant `done` — mode source uniquement.
+      required: [type, citations]
+      properties:
+        type: { const: citations }
+        citations:
+          type: array
+          items: { $ref: "#/components/schemas/Citation" }
+
+    ChatDoneEvent:
+      type: object
+      description: Terminal — le message assistant est persisté, récupérable via l'historique.
+      required: [type, messageId]
+      properties:
+        type: { const: done }
+        messageId: { type: string, format: uuid }
+        conversationId:
+          type: string
+          format: uuid
+          description: Renvoyé pour permettre au front de poursuivre un thread créé implicitement.
+
+    ChatErrorEvent:
+      type: object
+      description: Échec en cours de flux — mêmes sémantiques que le schéma `Error`, puis fermeture.
+      required: [type, message, code]
+      properties:
+        type: { const: error }
+        message: { type: string }
+        code: { type: string, pattern: "^[A-Z0-9_]+$" }
+
+    ChatStreamEvent:
+      description: >
+        Payload JSON d'une ligne `data:` du flux SSE. La sentinelle finale `data: [DONE]`
+        n'est pas un JSON et n'est pas couverte par ce schéma.
+      oneOf:
+        - $ref: "#/components/schemas/ChatTokenEvent"
+        - $ref: "#/components/schemas/ChatCitationsEvent"
+        - $ref: "#/components/schemas/ChatDoneEvent"
+        - $ref: "#/components/schemas/ChatErrorEvent"
+      discriminator:
+        propertyName: type
+        mapping:
+          token: "#/components/schemas/ChatTokenEvent"
+          citations: "#/components/schemas/ChatCitationsEvent"
+          done: "#/components/schemas/ChatDoneEvent"
+          error: "#/components/schemas/ChatErrorEvent"
+
+    # ── Summaries ────────────────────────────────────────────────────────────
+    GenerateSummaryRequest:
+      type: object
+      required: [length, format]
+      properties:
+        documentIds:
+          type: array
+          items: { type: string, format: uuid }
+          description: Sous-ensemble de sources ; absent = tout le notebook.
+        length:
+          type: string
+          enum: [brief, standard, detailed]
+        format:
+          type: string
+          enum: [paragraphs, bullet_points, outline]
+
+    NotebookSummary:
+      type: object
+      required: [id, notebookId, title, body, wordCount, generatedAt, sourceDocumentIds, length, format]
+      properties:
+        id: { type: string, format: uuid }
+        notebookId: { type: string, format: uuid }
+        title: { type: string }
+        body: { type: string, description: Markdown. }
+        wordCount: { type: integer, minimum: 0 }
+        generatedAt: { type: string, format: date-time }
+        sourceDocumentIds:
+          type: array
+          items: { type: string, format: uuid }
+        length:
+          type: string
+          enum: [brief, standard, detailed]
+        format:
+          type: string
+          enum: [paragraphs, bullet_points, outline]

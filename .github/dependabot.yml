@@ -1,0 +1,19 @@
+version: 2
+updates:
+  # Dépendances npm — mises à jour hebdomadaires, groupées pour réduire le bruit.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    groups:
+      production-dependencies:
+        dependency-type: "production"
+      development-dependencies:
+        dependency-type: "development"
+
+  # Actions GitHub — maintient les SHAs épinglés du workflow CI à jour (cohérent post-incident).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
